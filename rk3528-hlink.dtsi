@@ -1,0 +1,259 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * 核心依赖文件：已修复 USB 3.0 速度、激活百兆网定义、优化 SD 卡兼容性
+ */
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pwm/pwm.h>
+#include "rk3528.dtsi"
+#include "rk3528-op-pwm.dtsi"
+
+/ {
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		pinctrl-names = "default";
+		/* 核心：这里必须同时包含复位引脚和 32k 时钟引脚 */
+		pinctrl-0 = <&wifi_enable_h>, <&wifi_32k_out>;
+		reset-gpios = <&gpio3 RK_PB4 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <500>;
+	};
+
+	adc_keys: adc-keys {
+		status = "okay";
+		compatible = "adc-keys";
+		io-channels = <&saradc 0>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;
+		poll-interval = <100>;
+
+		vol-up-key {
+			label = "volume up";
+			linux,code = <KEY_VOLUMEUP>;
+			press-threshold-microvolt = <1750>;
+		};
+	};
+
+	aliases {
+		ethernet0 = &gmac0; /* 默认指向百兆 */
+		mmc0 = &sdmmc;
+		mmc1 = &sdhci;
+	};
+
+	chosen: chosen {
+		stdout-path = "serial0:1500000n8";
+	};
+
+	/* 电源调节器核心配置 */
+	vcc12v_dcin: vcc12v-dcin {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc12v-dcin";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <12000000>;
+		regulator-max-microvolt = <12000000>;
+	};
+
+	vcc5v0_sys: vcc5v0-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&vcc12v_dcin>;
+	};
+
+	vcc_3v3_s3: vcc-3v3-s3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_3v3_s3";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+
+	vdd_1v8_s3: vdd-1v8-s3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_1v8_s3";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+
+	vdd_logic: vdd-logic {
+		compatible = "pwm-regulator";
+		pwms = <&pwm2 0 5000 PWM_POLARITY_INVERTED>;
+		regulator-name = "vdd_logic";
+		regulator-min-microvolt = <705000>;
+		regulator-max-microvolt = <1006000>;
+		regulator-init-microvolt = <950000>;
+		regulator-always-on;
+		regulator-boot-on;
+		pwm-supply = <&vcc5v0_sys>;
+		status = "okay";
+	};
+
+	vdd_arm: vdd-arm {
+		compatible = "pwm-regulator";
+		pwms = <&pwm1 0 5000 PWM_POLARITY_INVERTED>;
+		regulator-name = "vdd_arm";
+		regulator-min-microvolt = <746000>;
+		regulator-max-microvolt = <1201000>;
+		regulator-init-microvolt = <953000>;
+		regulator-always-on;
+		regulator-boot-on;
+		pwm-supply = <&vcc5v0_sys>;
+		status = "okay";
+	};
+
+	/* SD 卡电源：移除电平切换逻辑，固定 3.3V 提高兼容性 */
+	vcc_sd: vcc-sd {
+		compatible = "regulator-fixed";
+		gpio = <&gpio4 RK_PA1 GPIO_ACTIVE_LOW>;
+		regulator-name = "vcc_sd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc_3v3_s3>;
+	};
+
+	vccio_sd: vccio-sd {
+		compatible = "regulator-fixed";
+		regulator-name = "vccio_sd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+};
+
+/* 确保 USB 2.0 控制器正确挂载到 PHY */
+&usb_host0_ehci {
+	/* 必须绑定物理层，否则只能供电无法通信 */
+	phys = <&u2phy_host>;
+	phy-names = "usb2-phy";
+	status = "okay";
+};
+
+&usb_host0_ohci {
+	phys = <&u2phy_host>;
+	phy-names = "usb2-phy";
+	status = "okay";
+};
+
+&combphy {
+	status = "okay";
+	rockchip,u3phy-only; 
+};
+
+/* 确保 XHCI 同时支持 2.0 握手 */
+&usb_host0_xhci {
+	status = "okay";
+	extcon = <&u2phy>;
+	maximum-speed = "super-speed";
+	/* 这里必须包含 u2phy_otg 才能让 2.0 设备在这个口工作 */
+	phys = <&u2phy_otg>, <&combphy PHY_TYPE_USB3>;
+	phy-names = "usb2-phy", "usb3-phy";
+	/* 解决拔掉再插导致的设备掉线 (Quirks) */
+	snps,dis_u2_susphy_quirk;
+	snps,dis_enblslpm_quirk;
+	snps,dis_u3_susphy_quirk;
+	snps,dis-del-phy-power-on-res-quirk;
+	snps,tx-fifo-resize;
+};
+
+/* 核心 PHY 定义 */
+&u2phy {
+	status = "okay";
+};
+
+&u2phy_host {
+	phy-supply = <&vcc5v0_sys>;
+	status = "okay";
+};
+
+&u2phy_otg {
+	phy-supply = <&vcc5v0_sys>;
+	status = "okay";
+};
+
+/* --- 百兆网 GMAC0 定义 --- */
+&gmac0 {
+	phy-mode = "rmii";
+	phy-handle = <&rmii0_phy>;
+};
+
+&mdio0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	rmii0_phy: ethernet-phy@2 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0x2>;
+		phy-is-integrated;
+		resets = <&cru SRST_MACPHY>;
+	};
+};
+
+/* --- 基础外设 --- */
+&cpu0 { cpu-supply = <&vdd_arm>; };
+&cpu1 { cpu-supply = <&vdd_arm>; };
+&cpu2 { cpu-supply = <&vdd_arm>; };
+&cpu3 { cpu-supply = <&vdd_arm>; };
+
+&pinctrl {
+	wifi {
+		/* WiFi 使能/复位引脚 */
+		wifi_enable_h: wifi-enable-h {
+			rockchip,pins = <3 RK_PB4 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		/* 32k 时钟输出引脚 - 必须设置为 M3 模式 */
+		wifi_32k_out: wifi-32k-out {
+			rockchip,pins = <3 RK_PC3 RK_FUNC_3 &pcfg_pull_none>;
+		};
+	};
+};
+
+&pwm1 { status = "okay"; };
+&pwm2 { status = "okay"; };
+&saradc { status = "okay"; vref-supply = <&vdd_1v8_s3>; };
+
+&sdmmc {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	max-frequency = <50000000>;
+	/delete-property/ sd-uhs-sdr12;
+	/delete-property/ sd-uhs-sdr25;
+	/delete-property/ sd-uhs-sdr50;
+	/delete-property/ sd-uhs-sdr104;
+	vmmc-supply = <&vcc_sd>;
+	vqmmc-supply = <&vccio_sd>;
+	status = "okay";
+};
+
+&sdhci {
+	bus-width = <8>;
+	non-removable;
+	status = "okay";
+};
+
+&uart0 { status = "okay"; };
+
+/* WiFi 控制器 (SDIO) 激活 */
+&sdio1 {
+	status = "okay";
+	mmc-pwrseq = <&sdio_pwrseq>;
+	bus-width = <4>;
+	non-removable;
+	supports-sdio;
+	/* 使用 sdio1 默认的引脚配置 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdio1_bus4>, <&sdio1_clk>, <&sdio1_cmd>;
+
+	rtl8733bs: wifi@1 {
+		compatible = "realtek,rtl8733bs", "sdio,common-wifi";
+		reg = <1>;
+	};
+};
